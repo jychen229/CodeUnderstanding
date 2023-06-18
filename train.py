@@ -67,3 +67,5 @@ for epoch in range(epochs):
 
         if step != 0 and step % 500 == 0:
             torch.save(model, f"./model_{step}.pt")
+            torch.save(GNN,f"./GNN_{step}.pt")
+            torch.save(gnn_out,f"./node2vec{step}.pt")
