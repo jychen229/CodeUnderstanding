@@ -3,7 +3,9 @@
 
 import torch
 import torch.nn as nn
-from torch_geometric.nn import GATConv, Linear, to_hetero
+import torch.nn.functional as F
+
+from torch_geometric.nn import GATConv, Linear, to_hetero, GCNConv, SAGEConv
 
 import math
 
@@ -26,15 +28,14 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         """
-        x 为embedding后的inputs，例如(1,7, 128)，batch size为1, 7个单词，单词维度为128
         """
         x = x + self.pe[:, : x.size(1)].requires_grad_(False)
         return self.dropout(x)
     
     
 
-class GAT(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels):
+class GAT(nn.Module):
+    def __init__(self, hidden_channels, out_channels, num_layers = 2):
         super().__init__()
         self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False)
         self.lin1 = Linear(-1, hidden_channels)
@@ -47,6 +48,38 @@ class GAT(torch.nn.Module):
         x = self.conv2(x, edge_index) + self.lin2(x)
         return x.relu()
     
+class GCN(nn.Module):
+    def __init__(self, hidden_size, num_classes, num_layers = 2):
+        super(GCN, self).__init__()
+        self.num_layers = num_layers
+        self.convs = nn.ModuleList()
+        self.convs.append(GCNConv(-1, hidden_size))  
+
+        for _ in range(num_layers - 2):  
+            self.convs.append(GCNConv(-1, hidden_size))
+
+        self.convs.append(GCNConv(-1, num_classes))  
+
+    def forward(self, x, edge_index):
+        for i in range(self.num_layers - 1):
+            x = self.convs[i](x, edge_index)
+            x = F.relu(x)
+            x = F.dropout(x, training=self.training)
+
+        x = self.convs[-1](x, edge_index)
+        return x.relu()
+    
+class SAGE(torch.nn.Module):
+    def __init__(self, hidden_channels, out_channels, num_layers = 2):
+        super().__init__()
+        self.conv1 = SAGEConv((-1, -1), hidden_channels)
+        self.conv2 = SAGEConv((-1, -1), out_channels)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index).relu()
+        x = self.conv2(x, edge_index)
+        return x    
+
     
 class Node2Vec(nn.Module):
     def __init__(self, graph_model, max_len, tokenzier, d_model):
@@ -89,21 +122,32 @@ class Node2Vec(nn.Module):
     
 
 class TranslationModel(nn.Module):
-
-    def __init__(self, d_model, src_vocab, tgt_vocab, dropout=0.1):
+    def __init__(self, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, src_vocab, tgt_vocab, alpha,           dropout=0.1):
         super(TranslationModel, self).__init__()
 
         self.tgt_embedding = nn.Embedding(len(tgt_vocab), d_model, padding_idx=0)
+        self.src_embedding = nn.Embedding(len(src_vocab), d_model, padding_idx=0)
+
         self.positional_encoding = PositionalEncoding(d_model, dropout, max_len=80)
-        self.transformer = nn.Transformer(d_model, dropout=dropout, batch_first=True)
+        
+        self.transformer = nn.Transformer(d_model = d_model, 
+                                          nhead = nhead,
+                                          num_encoder_layers = num_encoder_layers,
+                                          num_decoder_layers = num_decoder_layers,
+                                          dim_feedforward = dim_feedforward,
+                                          dropout = dropout, 
+                                          batch_first = True)
+        
         self.predictor = nn.Linear(d_model, len(tgt_vocab))
+        self.register_buffer('alpha', torch.tensor(alpha))
 
     def forward(self, src, tgt, emb):
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt.size()[-1])
         src_key_padding_mask = TranslationModel.get_key_padding_mask(src)
         tgt_key_padding_mask = TranslationModel.get_key_padding_mask(tgt)
 
-        src = emb
+        #src = emb
+        src =self.alpha * emb + (1-self.alpha)* self.src_embedding(src)
         tgt = self.tgt_embedding(tgt)
         src = self.positional_encoding(src)
         tgt = self.positional_encoding(tgt)
